@@ -285,6 +285,7 @@ render_nginx() {
 
   cat <<EOF
 # Dikelola oleh ollama-prod.sh - jangan edit manual (berisi token, perm 600)
+map_hash_bucket_size 128;   # "Bearer <64 hex>" = 71 karakter > bucket default (32/64)
 map \$http_authorization \$ollama_auth_ok {
     default 0;
     "Bearer ${token}" 1;
@@ -346,7 +347,7 @@ setup_proxy() {
   gen_cert
   render_nginx > "$NGINX_CONF"
   chmod 600 "$NGINX_CONF"
-  nginx -t
+  nginx -t || die "nginx -t gagal (lihat pesan di atas). Config: ${NGINX_CONF}"
   systemctl enable nginx >/dev/null 2>&1 || true
   systemctl restart nginx
 }
