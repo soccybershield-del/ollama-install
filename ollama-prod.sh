@@ -105,8 +105,26 @@ free_gb() {
   df -BG --output=avail "$p" | tail -n1 | tr -dc '0-9'
 }
 
+validate_ips() {
+  local ip
+  IFS=',' read -ra _v <<< "$ALLOWED_IPS"
+  for ip in "${_v[@]}"; do
+    ip="$(echo "$ip" | xargs)"
+    [[ -z "$ip" ]] && continue
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
+      local o IFS=.; read -ra o <<< "${ip%%/*}"
+      local x; for x in "${o[@]}"; do (( 10#$x <= 255 )) || die "ALLOWED_IPS tidak valid: '${ip}'"; done
+    elif [[ "$ip" =~ ^[0-9a-fA-F:]+(/[0-9]{1,3})?$ && "$ip" == *:* ]]; then
+      :
+    else
+      die "ALLOWED_IPS tidak valid: '${ip}' (contoh benar: 10.131.94.10,10.131.94.11)"
+    fi
+  done
+}
+
 preflight() {
   log "Preflight check..."
+  validate_ips
   command -v systemctl >/dev/null || die "systemd tidak ditemukan"
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
