@@ -22,7 +22,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 STATE_DIR="/etc/ollama-prod"
 STATE_FILE="${STATE_DIR}/deploy.env"
 TOKEN_FILE="${STATE_DIR}/api-token"
@@ -236,16 +236,70 @@ wait_for_ollama() {
   die "Ollama tidak merespon. Cek: journalctl -u ollama -n 100 --no-pager"
 }
 
+# Lokasi folder model (blobs/ + manifests/)
+models_dir() {
+  local d="${OLLAMA_MODELS_DIR:-}"
+  if [[ -z "$d" ]]; then
+    local h; h="$(getent passwd ollama 2>/dev/null | cut -d: -f6)"
+    d="${h:-/usr/share/ollama}/.ollama/models"
+  fi
+  printf '%s' "$d"
+}
+
+# Perbaiki owner/izin/flag immutable (penyebab umum "Error: remove ... blob" gagal)
+fix_models_perms() {
+  local d; d="$(models_dir)"
+  [[ -d "$d" ]] || return 0
+  command -v chattr >/dev/null 2>&1 && chattr -R -i "$d" 2>/dev/null || true
+  if id ollama >/dev/null 2>&1; then chown -R ollama:ollama "$d" 2>/dev/null || true; fi
+  chmod -R u+rwX "$d" 2>/dev/null || true
+}
+
+# Hapus sisa download parsial (dipakai hanya setelah gagal berulang)
+clean_partials() {
+  local b; b="$(models_dir)/blobs"
+  [[ -d "$b" ]] || return 0
+  find "$b" -maxdepth 1 -name 'sha256-*-partial*' -print -delete 2>/dev/null || true
+}
+
+# Hapus blob yang disebut di pesan error "remove <path>" (hanya di dalam folder model)
+remove_failed_blobs() {
+  local logf="$1" f base; base="$(models_dir)/blobs/"
+  local paths; paths="$(grep -ao 'remove [^ ]*sha256-[0-9a-f]*' "$logf" 2>/dev/null | awk '{print $2}' | sort -u || true)"
+  while IFS= read -r f; do
+    [[ -n "$f" && "$f" == "${base}sha256-"* && -e "$f" ]] || continue
+    warn "Hapus blob bermasalah: ${f}"
+    chattr -i "$f" 2>/dev/null || true
+    rm -f -- "$f" || warn "Tetap gagal dihapus: $(ls -l -- "$f" 2>&1)"
+  done <<< "$paths"
+}
+
 pull_model() {
   if [[ "$SKIP_PULL" == "1" ]]; then warn "SKIP_PULL=1: model tidak diunduh."; return; fi
+  if ollama show "$MODEL" >/dev/null 2>&1; then
+    log "Model ${MODEL} sudah ada lengkap, lewati download."
+    return 0
+  fi
   log "Download model ${MODEL} (bisa lama)..."
-  local n
-  for n in 1 2 3; do
-    if ollama pull "$MODEL"; then return 0; fi
-    warn "Pull gagal (percobaan ${n}/3), ulangi dalam 10 detik..."
+  fix_models_perms
+  local n max=4 lf; lf="$(mktemp /tmp/ollama-pull.XXXXXX)"
+  for (( n=1; n<=max; n++ )); do
+    if ollama pull "$MODEL" 2>&1 | tee "$lf"; then rm -f "$lf"; return 0; fi
+    warn "Pull gagal (percobaan ${n}/${max}). Memperbaiki izin & blob bermasalah, ulangi dalam 10 detik..."
+    fix_models_perms
+    remove_failed_blobs "$lf"
+    (( n >= 3 )) && clean_partials
     sleep 10
   done
-  die "Gagal download model ${MODEL}."
+  local d; d="$(models_dir)"
+  err_diag() { printf '  %s\n' "$*" >&2; }
+  warn "Diagnosa:"
+  err_diag "folder model : ${d}"
+  err_diag "izin         : $(ls -ld "${d}/blobs" 2>&1)"
+  err_diag "mount        : $(findmnt -no TARGET,OPTIONS -T "${d}" 2>&1 | head -1)"
+  err_diag "disk bebas   : $(df -h --output=avail "${d}" 2>&1 | tail -1 | tr -d ' ')"
+  err_diag "log pull     : ${lf}"
+  die "Gagal download model ${MODEL}. Lihat diagnosa & log di atas; setelah diperbaiki jalankan ulang script."
 }
 
 # ---------- token & TLS ----------
