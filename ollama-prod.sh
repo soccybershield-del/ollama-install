@@ -118,7 +118,7 @@ validate_ips() {
     elif [[ "$ip" =~ ^[0-9a-fA-F:]+(/[0-9]{1,3})?$ && "$ip" == *:* ]]; then
       :
     else
-      die "ALLOWED_IPS tidak valid: '${ip}' (contoh benar: 10.131.94.10,10.131.94.11)"
+      die "ALLOWED_IPS tidak valid: '${ip}' (contoh benar: 192.0.2.10,192.0.2.11)"
     fi
   done
 }
