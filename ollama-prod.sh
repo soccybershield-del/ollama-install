@@ -22,7 +22,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.2.0"
 STATE_DIR="/etc/ollama-prod"
 STATE_FILE="${STATE_DIR}/deploy.env"
 TOKEN_FILE="${STATE_DIR}/api-token"
@@ -45,6 +45,7 @@ require_root() { [[ $EUID -eq 0 ]] || die "Jalankan sebagai root (sudo $0 ...)";
 # ---------- konfigurasi (default + override via env) ----------
 load_config() {
   MODEL="${MODEL:-gpt-oss:20b}"
+  EXTRA_MODELS="${EXTRA_MODELS:-}"               # model tambahan (pisah koma), mis. "orcarouter/Qwen3.8-27B-Uncensored:q4_K_M"
   OLLAMA_VERSION="${OLLAMA_VERSION:-}"          # kosong = latest (disarankan pin versi)
   OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-}"    # kosong = default Ollama
   OLLAMA_PORT="${OLLAMA_PORT:-11434}"
@@ -275,6 +276,7 @@ remove_failed_blobs() {
 }
 
 pull_model() {
+  local MODEL="${1:-$MODEL}"
   if [[ "$SKIP_PULL" == "1" ]]; then warn "SKIP_PULL=1: model tidak diunduh."; return; fi
   if ollama show "$MODEL" >/dev/null 2>&1; then
     log "Model ${MODEL} sudah ada lengkap, lewati download."
@@ -300,6 +302,19 @@ pull_model() {
   err_diag "disk bebas   : $(df -h --output=avail "${d}" 2>&1 | tail -1 | tr -d ' ')"
   err_diag "log pull     : ${lf}"
   die "Gagal download model ${MODEL}. Lihat diagnosa & log di atas; setelah diperbaiki jalankan ulang script."
+}
+
+# Model tambahan (opsional). Gagal di sini tidak menggagalkan install.
+pull_extra_models() {
+  [[ -n "${EXTRA_MODELS:-}" ]] || return 0
+  [[ "$SKIP_PULL" == "1" ]] && return 0
+  local m
+  IFS=',' read -ra _em <<< "$EXTRA_MODELS"
+  for m in "${_em[@]}"; do
+    m="$(echo "$m" | xargs)"
+    [[ -n "$m" ]] || continue
+    ( pull_model "$m" ) || warn "Model tambahan ${m} gagal diunduh; install tetap dilanjutkan. Ulangi: ollama pull ${m}"
+  done
 }
 
 # ---------- token & TLS ----------
@@ -607,6 +622,8 @@ EOF
    Base URL : ${SCHEME}://${SERVER_ADDR}:${PUBLIC_PORT}/v1
    API key  : (token di bawah)
    Model    : ${MODEL}   -> klik refresh model list
+${EXTRA_MODELS:+   Model tambahan (pilih di ARTEX bila perlu): ${EXTRA_MODELS}
+}
 EOF
     if [[ "${ALLOW_NATIVE_API:-0}" == "1" ]]; then
       cat <<EOF
@@ -665,6 +682,7 @@ cmd_install() {
   save_state   # simpan ulang karena TLS_CERT/TLS_KEY bisa terisi otomatis
   setup_firewall
   pull_model
+  pull_extra_models
   install_helpers
   smoke_test
   summary
