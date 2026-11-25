@@ -22,7 +22,7 @@
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="2.2.0"
+SCRIPT_VERSION="2.3.0"
 STATE_DIR="/etc/ollama-prod"
 STATE_FILE="${STATE_DIR}/deploy.env"
 TOKEN_FILE="${STATE_DIR}/api-token"
@@ -327,6 +327,11 @@ gen_token() {
   fi
 }
 
+# Sertifikat harus memuat IP server di SAN, kalau tidak klien modern (Go/curl/Node) menolaknya
+cert_has_san() {
+  openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null | grep -q "IP Address:${SERVER_ADDR}"
+}
+
 gen_cert() {
   [[ "$TLS" == "1" ]] || return 0
   if [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]]; then
@@ -335,17 +340,26 @@ gen_cert() {
     return 0
   fi
   TLS_CERT="${TLS_DIR}/server.crt"; TLS_KEY="${TLS_DIR}/server.key"
-  if [[ -s "$TLS_CERT" && -s "$TLS_KEY" ]]; then return 0; fi
-  log "Generate sertifikat self-signed (10 tahun)..."
+  if [[ -s "$TLS_CERT" && -s "$TLS_KEY" ]]; then
+    if cert_has_san "$TLS_CERT"; then return 0; fi
+    local bk; bk="${TLS_DIR}/old-$(date +%Y%m%d-%H%M%S)"
+    warn "Sertifikat lama tidak memuat IP ${SERVER_ADDR} di SAN. Dibackup ke ${bk} lalu dibuat ulang."
+    mkdir -p "$bk"; mv "$TLS_CERT" "$TLS_KEY" "$bk"/
+  fi
+  log "Generate sertifikat self-signed (10 tahun) untuk ${SERVER_ADDR}..."
   mkdir -p "$TLS_DIR"; chmod 750 "$TLS_DIR"
   local san="IP:${SERVER_ADDR},IP:127.0.0.1,DNS:$(hostname -f 2>/dev/null || hostname)"
   [[ -n "$EXTRA_SAN" ]] && san="${san},${EXTRA_SAN}"
+  local ef; ef="$(mktemp /tmp/gencert.XXXXXX)"
   ( umask 077
     openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
       -keyout "$TLS_KEY" -out "$TLS_CERT" \
       -subj "/CN=ollama-ai-server/O=Local AI Server" \
-      -addext "subjectAltName=${san}" >/dev/null 2>&1 )
+      -addext "subjectAltName=${san}" 2>"$ef" ) || { cat "$ef" >&2; die "Gagal membuat sertifikat (openssl)."; }
+  rm -f "$ef"
   chmod 644 "$TLS_CERT"; chmod 600 "$TLS_KEY"
+  cert_has_san "$TLS_CERT" || die "Sertifikat jadi tapi SAN tidak memuat IP ${SERVER_ADDR}. Cek versi openssl: $(openssl version)"
+  log "Sertifikat OK. SAN: $(openssl x509 -in "$TLS_CERT" -noout -ext subjectAltName 2>/dev/null | tail -1 | xargs)"
 }
 
 # ---------- nginx reverse proxy ----------
