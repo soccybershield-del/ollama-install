@@ -57,6 +57,7 @@ load_config() {
 
   ENABLE_PROXY="${ENABLE_PROXY:-1}"             # 0 = tanpa nginx (tanpa auth, TIDAK disarankan)
   PUBLIC_PORT="${PUBLIC_PORT:-8443}"
+  ALLOW_NATIVE_API="${ALLOW_NATIVE_API:-0}"     # 1 = buka juga /api/chat,/api/generate,/api/tags,/api/show,/api/version (untuk aplikasi yg pakai API asli Ollama)
   TLS="${TLS:-1}"
   TLS_CERT="${TLS_CERT:-}"                      # pakai sertifikat sendiri (opsional)
   TLS_KEY="${TLS_KEY:-}"
@@ -84,7 +85,7 @@ save_state() {
   mkdir -p "$STATE_DIR"; chmod 750 "$STATE_DIR"
   {
     echo "# Dibuat oleh ollama-prod.sh v${SCRIPT_VERSION} pada $(date -Is)"
-    for v in MODEL OLLAMA_PORT CTX ENABLE_PROXY PUBLIC_PORT TLS TLS_CERT TLS_KEY \
+    for v in MODEL OLLAMA_PORT CTX ENABLE_PROXY PUBLIC_PORT ALLOW_NATIVE_API TLS TLS_CERT TLS_KEY \
              SERVER_ADDR ALLOWED_IPS SCHEME FW_PORT; do
       printf '%s=%q\n' "$v" "${!v}"
     done
@@ -301,6 +302,27 @@ render_nginx() {
     listen_line="listen ${PUBLIC_PORT};"
   fi
 
+  local native_block=""
+  if [[ "${ALLOW_NATIVE_API:-0}" == "1" ]]; then
+    native_block='    # API asli Ollama (opt-in: ALLOW_NATIVE_API=1). /api/pull, /api/delete, dll tetap diblokir.
+    location ~ ^/api/(chat|generate|tags|show|version)$ {
+        if ($ollama_auth_ok = 0) { return 401 "unauthorized\n"; }
+        limit_req zone=ollama_rl burst=40 nodelay;
+
+        proxy_pass http://ollama_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Authorization "";
+
+        proxy_buffering off;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+    }
+'
+  fi
+
   cat <<EOF
 # Dikelola oleh ollama-prod.sh - jangan edit manual (berisi token, perm 600)
 map_hash_bucket_size 128;   # "Bearer <64 hex>" = 71 karakter > bucket default (32/64)
@@ -352,6 +374,7 @@ ${allow_lines}
         proxy_send_timeout 900s;
     }
 
+${native_block}
     location / { return 403 "forbidden\n"; }
 }
 EOF
@@ -531,6 +554,15 @@ EOF
    API key  : (token di bawah)
    Model    : ${MODEL}   -> klik refresh model list
 EOF
+    if [[ "${ALLOW_NATIVE_API:-0}" == "1" ]]; then
+      cat <<EOF
+
+ Aplikasi lain yang pakai API ASLI Ollama (mis. SOC Dashboard):
+   Base URL : ${SCHEME}://${SERVER_ADDR}:${PUBLIC_PORT}   (TANPA /v1)
+   API key  : token yang sama
+   Path terbuka: /api/chat /api/generate /api/tags /api/show /api/version
+EOF
+    fi
     if [[ "$TLS" == "1" && "$TLS_CERT" == "${TLS_DIR}/server.crt" ]]; then
       cat <<EOF
 
